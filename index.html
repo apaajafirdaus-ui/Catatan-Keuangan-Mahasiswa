@@ -136,6 +136,8 @@
       <button type="button" class="btn-tema shrink-0 min-h-[44px] px-3 rounded-xl border garis-warna text-sm teks-redup hover-utama transition"></button>
     </div>
     <p id="pesanCloud" class="hidden mb-4 text-sm teks-keluar" role="alert"></p>
+    <!-- Status sinkronisasi: menunjukkan apakah data benar-benar sudah tersimpan di cloud -->
+    <p id="statusCloud" class="mb-4 text-xs teks-sunyi" aria-live="polite"></p>
 
     <!-- ===== Ringkasan Dompet: 3 kartu ===== -->
     <section class="grid grid-cols-2 gap-3 mb-6">
@@ -155,7 +157,9 @@
 
     <!-- ===== Form Transaksi ===== -->
     <section class="rounded-2xl bg-kartu border garis-warna p-5 mb-6">
-      <h2 class="text-lg font-bold teks-utama mb-4">Catat transaksi</h2>
+      <h2 id="judulForm" class="text-lg font-bold teks-utama">Catat transaksi</h2>
+      <!-- Jam berjalan: menunjukkan waktu saat ini (waktu ini yang dicatat saat transaksi disimpan) -->
+      <p id="jamLive" class="text-xs teks-sunyi mt-1 mb-4" aria-live="off"></p>
 
       <form id="formTransaksi" class="space-y-4" novalidate>
 
@@ -220,6 +224,9 @@
 
         <button type="submit" id="btnSimpan"
           class="w-full min-h-[52px] rounded-xl font-bold teks-tombol transition active:scale-[0.98]">Simpan transaksi</button>
+        <!-- Muncul hanya saat mode ubah -->
+        <button type="button" id="btnBatal"
+          class="hidden w-full min-h-[48px] rounded-xl border garis-warna teks-redup hover-utama transition">Batal ubah</button>
       </form>
     </section>
 
@@ -238,6 +245,26 @@
     </section>
   </main>
 
+  <!-- ===== Jendela Detail Transaksi ===== -->
+  <div id="modalDetail" class="hidden fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4"
+       style="background: rgba(0,0,0,0.6)" role="dialog" aria-modal="true" aria-labelledby="detailJudul">
+    <div class="w-full max-w-md max-h-[90vh] overflow-y-auto rounded-2xl bg-kartu border garis-warna p-5">
+      <div class="flex items-start justify-between gap-3">
+        <h2 id="detailJudul" class="text-lg font-bold teks-utama break-words min-w-0">Detail transaksi</h2>
+        <button type="button" id="detailTutup" aria-label="Tutup"
+          class="shrink-0 min-h-[44px] min-w-[44px] rounded-lg border garis-warna teks-redup hover-utama transition">&#10005;</button>
+      </div>
+      <p id="detailNominal" class="text-2xl font-extrabold mt-2 break-words"></p>
+      <dl id="detailIsi" class="mt-4 space-y-3 text-sm"></dl>
+      <div class="grid grid-cols-2 gap-2 mt-5">
+        <button type="button" id="detailUbah"
+          class="min-h-[48px] rounded-xl tombol-netral font-semibold transition active:scale-[0.98]">Ubah</button>
+        <button type="button" id="detailHapus"
+          class="min-h-[48px] rounded-xl border garis-warna teks-redup hover-keluar transition">Hapus</button>
+      </div>
+    </div>
+  </div>
+
   <!-- type="module" wajib agar bisa memakai import dari Firebase -->
   <script type="module">
     /* =========================================================
@@ -246,13 +273,17 @@
        1. Pengguna masuk dengan Google (Firebase Authentication).
        2. Transaksi disimpan di Cloud Firestore, di bawah ID akun masing-masing.
        3. onSnapshot "mendengarkan" database: setiap data berubah
-          (tambah/hapus), layar otomatis digambar ulang.
+          (tambah/ubah/hapus), layar otomatis digambar ulang.
+       4. CRUD: Create (form), Read (daftar + jendela detail),
+          Update (tombol Ubah), Delete (tombol Hapus).
+       5. Penanda status cloud memberi tahu apakah data sudah benar-benar
+          diterima server (bukan hanya tampil di layar).
        ========================================================= */
 
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
     import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
       from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-    import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch }
+    import { initializeFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, writeBatch }
       from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
     // ---------- 0. KONFIGURASI FIREBASE ----------
@@ -269,7 +300,11 @@
 
     const app = initializeApp(firebaseConfig);
     const auth = getAuth(app);
-    const db = getFirestore(app);
+    // Nama database Firestore. Biarkan '(default)' kecuali kamu membuat database dengan ID lain di Firebase.
+    const NAMA_DATABASE = '(default)';
+    // experimentalForceLongPolling = cara sambung yang lebih tahan terhadap jaringan/ekstensi yang memblokir
+    // koneksi biasa. Tanpa ini, data bisa "tampak tersimpan" di layar padahal belum sampai ke server.
+    const db = initializeFirestore(app, { experimentalForceLongPolling: true }, NAMA_DATABASE);
 
     // ---------- 1. DATA & KONSTANTA ----------
     const KUNCI_LAMA = 'pengatur-uang-anakkos-transaksi'; // data lama di browser (untuk dipindahkan)
@@ -285,6 +320,9 @@
     let filterBulan = 'semua';
     let filterTahun = 'semua';
     let tipeAktif = 'pengeluaran';
+    let idDiedit = null;         // id transaksi yang sedang diubah (null = mode tambah baru)
+    let idDetail = null;         // id transaksi yang sedang dibuka di jendela detail
+    const NAMA_HARI = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
 
     // Pendek-pendekan untuk document.getElementById
     const el = (id) => document.getElementById(id);
@@ -305,6 +343,20 @@
     const bulanDari = (t) => typeof t.bulan === 'number' ? t.bulan : new Date(t.id).getMonth();
     const tahunDari = (t) => typeof t.tahun === 'number' ? t.tahun : new Date(t.id).getFullYear();
     const tanggalDari = (t) => typeof t.tanggal === 'number' ? t.tanggal : new Date(t.id).getDate();
+
+    // Cari satu transaksi berdasarkan id
+    const cari = (id) => transaksi.find(t => String(t.id) === String(id));
+
+    // Waktu pencatatan: transaksi lama (tanpa field "dibuat") memakai id, yang memang berisi waktu pencatatan
+    const waktuDibuat = (t) => t.dibuat || t.id;
+
+    // Format waktu lengkap, contoh: "4 Oktober 2026, 00.51"
+    function formatWaktu(ms) {
+      const d = new Date(ms);
+      const dua = (n) => String(n).padStart(2, '0');
+      return d.getDate() + ' ' + NAMA_BULAN[d.getMonth()] + ' ' + d.getFullYear() +
+             ', ' + dua(d.getHours()) + '.' + dua(d.getMinutes());
+    }
 
     // Ubah "1000000" -> "1.000.000" (sisipkan titik tiap 3 angka dari kanan)
     function formatTitik(teksAngka) {
@@ -413,22 +465,31 @@
 
       el('daftar').innerHTML = terurut.map(t => {
         const masuk = t.tipe === 'pemasukan';
+        // Baris atas bisa diklik = lihat detail. Baris bawah = tombol Ubah & Hapus.
         return `
-          <li class="flex items-center gap-3 rounded-xl bg-kartu border garis-warna p-3">
-            <div class="w-1 self-stretch rounded-full ${masuk ? 'bg-masuk' : 'bg-keluar'}"></div>
-            <div class="flex-1 min-w-0">
-              <p class="font-semibold teks-utama truncate">${aman(t.judul)}</p>
-              <p class="text-xs teks-sunyi">${aman(t.kategori)} &middot; ${tanggalDari(t)} ${NAMA_BULAN[bulanDari(t)]} ${tahunDari(t)}</p>
-            </div>
-            <p class="font-bold whitespace-nowrap ${masuk ? 'teks-masuk' : 'teks-keluar'}">
-              ${masuk ? '+' : '-'}${formatRupiah(t.nominal)}
-            </p>
-            <button data-id="${t.id}" aria-label="Hapus ${aman(t.judul)}"
-              class="btn-hapus min-h-[44px] px-3 rounded-lg text-sm teks-redup border garis-warna hover-keluar transition">
-              Hapus
+          <li class="rounded-xl bg-kartu border garis-warna p-3">
+            <button type="button" data-id="${t.id}" aria-label="Lihat detail ${aman(t.judul)}"
+              class="btn-detail w-full flex items-center gap-3 text-left">
+              <div class="w-1 self-stretch rounded-full ${masuk ? 'bg-masuk' : 'bg-keluar'}"></div>
+              <div class="flex-1 min-w-0">
+                <p class="font-semibold teks-utama truncate">${aman(t.judul)}</p>
+                <p class="text-xs teks-sunyi">${aman(t.kategori)} &middot; ${tanggalDari(t)} ${NAMA_BULAN[bulanDari(t)]} ${tahunDari(t)}</p>
+                <p class="text-xs teks-sunyi">Dicatat ${formatWaktu(waktuDibuat(t))}${t.diubah ? ' &middot; diubah' : ''}</p>
+              </div>
+              <p class="font-bold whitespace-nowrap ${masuk ? 'teks-masuk' : 'teks-keluar'}">
+                ${masuk ? '+' : '-'}${formatRupiah(t.nominal)}
+              </p>
             </button>
+            <div class="flex justify-end gap-2 mt-2">
+              <button type="button" data-id="${t.id}" aria-label="Ubah ${aman(t.judul)}"
+                class="btn-ubah min-h-[44px] px-4 rounded-lg text-sm teks-redup border garis-warna hover-utama transition">Ubah</button>
+              <button type="button" data-id="${t.id}" aria-label="Hapus ${aman(t.judul)}"
+                class="btn-hapus min-h-[44px] px-4 rounded-lg text-sm teks-redup border garis-warna hover-keluar transition">Hapus</button>
+            </div>
           </li>`;
       }).join('');
+
+      isiDetail(); // bila jendela detail sedang terbuka, segarkan isinya
 
       el('kosong').textContent = transaksi.length === 0
         ? 'Belum ada transaksi. Isi formulir di atas untuk mencatat yang pertama.'
@@ -467,10 +528,40 @@
       if (pesan) el('pesanError').scrollIntoView({ block: 'center', behavior: 'smooth' });
     }
 
+    // Menunggu paling lama 10 detik. Jika server tidak menjawab, kita tahu data BELUM tersimpan di cloud.
+    function denganBatasWaktu(janji, ms = 10000) {
+      return Promise.race([
+        janji,
+        new Promise((_, tolak) => setTimeout(() => tolak({ code: 'timeout' }), ms))
+      ]);
+    }
+    const PESAN_TIMEOUT = 'Belum tersambung ke cloud, jadi data BELUM tersimpan permanen. ' +
+      'Periksa internet (matikan AdBlock/VPN untuk situs ini) lalu coba lagi.';
+
+    // Penanda status cloud di bawah header
+    let timerCloud = null;
+    function aturStatusCloud(status) {
+      const teks = {
+        menghubungkan: '\u23F3 Menghubungkan ke cloud...',
+        menyimpan: '\u23F3 Menyimpan ke cloud...',
+        tersimpan: '\u2705 Tersimpan di cloud',
+        gagal: '\u26A0\uFE0F Tidak tersambung ke cloud. Data belum tersimpan permanen dan akan hilang bila halaman di-refresh.',
+        kosong: ''
+      }[status];
+      el('statusCloud').textContent = teks;
+      el('statusCloud').className = 'mb-4 text-xs ' +
+        (status === 'tersimpan' ? 'teks-masuk' : status === 'gagal' ? 'teks-keluar' : 'teks-sunyi');
+      clearTimeout(timerCloud);
+      // Jika masih "menunggu" lebih dari 8 detik, anggap gagal tersambung
+      if (status === 'menghubungkan' || status === 'menyimpan') {
+        timerCloud = setTimeout(() => aturStatusCloud('gagal'), 8000);
+      }
+    }
+
     // Alamat dokumen/koleksi di Firestore: users / {id akun} / transaksi / {id transaksi}
     const koleksiTransaksi = () => collection(db, 'users', pengguna.uid, 'transaksi');
 
-    // Saat formulir dikirim
+    // Saat formulir dikirim (tambah baru ATAU simpan perubahan)
     el('formTransaksi').addEventListener('submit', async (e) => {
       e.preventDefault();
 
@@ -491,41 +582,173 @@
       }
       tampilError('');
 
-      const id = Date.now(); // dipakai sebagai nomor unik transaksi
+      // Mode ubah: pakai id lama. Mode tambah: id baru = waktu saat ini (milidetik), sekaligus nomor unik.
+      const lama = idDiedit ? cari(idDiedit) : null;
+      if (idDiedit && !lama) {
+        keluarModeUbah();
+        return tampilError('Transaksi yang sedang diubah sudah tidak ada (mungkin dihapus dari perangkat lain).');
+      }
+      const id = lama ? lama.id : Date.now();
+      const data = {
+        id: id,
+        judul: judul,
+        nominal: nominal,
+        kategori: el('kategori').value,
+        tanggal: tanggal,
+        bulan: bulan,
+        tahun: tahun,
+        tipe: tipeAktif,
+        dibuat: lama ? waktuDibuat(lama) : id   // waktu pencatatan tidak berubah saat transaksi diedit
+      };
+      if (lama) data.diubah = Date.now();       // waktu terakhir diubah
+
       try {
-        // setDoc = simpan satu dokumen ke Firestore. Layar diperbarui otomatis oleh onSnapshot.
-        await setDoc(doc(koleksiTransaksi(), String(id)), {
-          id: id,
-          judul: judul,
-          nominal: nominal,
-          kategori: el('kategori').value,
-          tanggal: tanggal,
-          bulan: bulan,
-          tahun: tahun,
-          tipe: tipeAktif
-        });
+        // setDoc = simpan (atau timpa) satu dokumen di Firestore. Layar diperbarui otomatis oleh onSnapshot.
+        await denganBatasWaktu(setDoc(doc(koleksiTransaksi(), String(id)), data));
       } catch (err) {
-        return tampilError('Gagal menyimpan ke cloud. Periksa koneksi internet. (' + err.code + ')');
+        return tampilError(err.code === 'timeout'
+          ? PESAN_TIMEOUT
+          : 'Gagal menyimpan ke cloud. (' + err.code + ')');
       }
 
+      if (lama) {
+        keluarModeUbah(); // kembali ke mode tambah, formulir dikosongkan
+      } else {
+        el('judul').value = '';
+        el('nominal').value = '';
+        el('judul').focus();
+      }
+    });
+
+    // ---------- UBAH (UPDATE) ----------
+    function aturTanggalHariIni() {
+      const s = new Date();
+      el('tanggal').value = s.getDate();
+      el('bulan').value = s.getMonth();
+      const y = s.getFullYear();
+      el('tahun').value = (y >= TAHUN_AWAL && y <= TAHUN_AKHIR) ? y : TAHUN_AWAL;
+      el('tahunLain').classList.add('hidden');
+      el('tahunLain').value = '';
+    }
+
+    // Isi formulir dengan data transaksi, lalu ubah tampilan menjadi "mode ubah"
+    function mulaiUbah(id) {
+      const t = cari(id);
+      if (!t) return;
+      tutupDetail();
+      idDiedit = t.id;
+      aturTipe(t.tipe);
+      el('judul').value = t.judul;
+      el('nominal').value = formatTitik(String(t.nominal));
+      el('tanggal').value = tanggalDari(t);
+      el('bulan').value = bulanDari(t);
+      const y = tahunDari(t);
+      if (y >= TAHUN_AWAL && y <= TAHUN_AKHIR) {
+        el('tahun').value = y;
+        el('tahunLain').classList.add('hidden');
+        el('tahunLain').value = '';
+      } else {
+        el('tahun').value = 'lain';          // tahun di luar 2026-2030 -> pakai kolom ketik sendiri
+        el('tahunLain').value = y;
+        el('tahunLain').classList.remove('hidden');
+      }
+      el('judulForm').textContent = 'Ubah transaksi';
+      el('btnSimpan').textContent = 'Simpan perubahan';
+      el('btnBatal').classList.remove('hidden');
+      tampilError('');
+      el('formTransaksi').scrollIntoView({ block: 'start', behavior: 'smooth' });
+      el('judul').focus({ preventScroll: true });
+    }
+
+    // Kembali ke mode tambah baru
+    function keluarModeUbah() {
+      idDiedit = null;
+      el('judulForm').textContent = 'Catat transaksi';
+      el('btnSimpan').textContent = 'Simpan transaksi';
+      el('btnBatal').classList.add('hidden');
       el('judul').value = '';
       el('nominal').value = '';
-      el('judul').focus();
-    });
+      aturTanggalHariIni();
+      aturTipe('pengeluaran');
+      tampilError('');
+    }
+    el('btnBatal').addEventListener('click', keluarModeUbah);
+
+    // ---------- DETAIL (READ) ----------
+    function bukaDetail(id) {
+      idDetail = id;
+      isiDetail();
+    }
+
+    function tutupDetail() {
+      idDetail = null;
+      el('modalDetail').classList.add('hidden');
+    }
+
+    // Isi jendela detail dari data terbaru; tutup bila transaksinya sudah tidak ada
+    function isiDetail() {
+      if (idDetail === null) return;
+      const t = cari(idDetail);
+      if (!t) return tutupDetail();
+      const masuk = t.tipe === 'pemasukan';
+      const baris = (nama, nilai) =>
+        `<div><dt class="teks-sunyi">${nama}</dt><dd class="teks-utama break-words">${nilai}</dd></div>`;
+
+      el('detailJudul').textContent = t.judul;
+      el('detailNominal').textContent = (masuk ? '+' : '-') + formatRupiah(t.nominal);
+      el('detailNominal').className = 'text-2xl font-extrabold mt-2 break-words ' + (masuk ? 'teks-masuk' : 'teks-keluar');
+      el('detailIsi').innerHTML =
+        baris('Jenis', masuk ? 'Pemasukan' : 'Pengeluaran') +
+        baris('Kategori', aman(t.kategori)) +
+        baris('Tanggal transaksi', tanggalDari(t) + ' ' + NAMA_BULAN[bulanDari(t)] + ' ' + tahunDari(t)) +
+        baris('Dicatat pada', formatWaktu(waktuDibuat(t))) +
+        (t.diubah ? baris('Terakhir diubah', formatWaktu(t.diubah)) : '');
+      el('modalDetail').classList.remove('hidden');
+    }
+
+    el('detailTutup').addEventListener('click', tutupDetail);
+    el('modalDetail').addEventListener('click', (e) => { if (e.target === el('modalDetail')) tutupDetail(); }); // klik area gelap
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') tutupDetail(); });
+    el('detailUbah').addEventListener('click', () => mulaiUbah(idDetail));
+    el('detailHapus').addEventListener('click', () => hapusTransaksi(idDetail));
+
+    // ---------- JAM BERJALAN ----------
+    function perbaruiJam() {
+      const s = new Date();
+      const dua = (n) => String(n).padStart(2, '0');
+      el('jamLive').textContent = 'Sekarang: ' + NAMA_HARI[s.getDay()] + ', ' + s.getDate() + ' ' +
+        NAMA_BULAN[s.getMonth()] + ' ' + s.getFullYear() + ' \u00B7 ' +
+        dua(s.getHours()) + '.' + dua(s.getMinutes()) + '.' + dua(s.getSeconds());
+    }
+    perbaruiJam();
+    setInterval(perbaruiJam, 1000);
 
     // Filter riwayat
     el('filterBulan').addEventListener('change', (e) => { filterBulan = e.target.value; render(); });
     el('filterTahun').addEventListener('change', (e) => { filterTahun = e.target.value; render(); });
 
-    // Hapus transaksi (satu pendengar untuk semua tombol Hapus)
-    el('daftar').addEventListener('click', async (e) => {
-      const tombol = e.target.closest('.btn-hapus');
-      if (!tombol) return;
+    // ---------- HAPUS (DELETE) ----------
+    async function hapusTransaksi(id) {
+      const t = cari(id);
+      if (!t) return;
+      if (!confirm('Hapus transaksi "' + t.judul + '"? Tindakan ini tidak bisa dibatalkan.')) return;
       try {
-        await deleteDoc(doc(koleksiTransaksi(), tombol.dataset.id));
+        await denganBatasWaktu(deleteDoc(doc(koleksiTransaksi(), String(id))));
+        if (String(idDiedit) === String(id)) keluarModeUbah(); // yang sedang diubah ikut dihapus
+        if (String(idDetail) === String(id)) tutupDetail();
       } catch (err) {
-        tampilError('Gagal menghapus. Periksa koneksi internet. (' + err.code + ')');
+        tampilError(err.code === 'timeout' ? PESAN_TIMEOUT : 'Gagal menghapus. (' + err.code + ')');
       }
+    }
+
+    // Satu pendengar untuk semua tombol di daftar (detail / ubah / hapus)
+    el('daftar').addEventListener('click', (e) => {
+      const detail = e.target.closest('.btn-detail');
+      const ubah = e.target.closest('.btn-ubah');
+      const hapus = e.target.closest('.btn-hapus');
+      if (detail) bukaDetail(detail.dataset.id);
+      else if (ubah) mulaiUbah(ubah.dataset.id);
+      else if (hapus) hapusTransaksi(hapus.dataset.id);
     });
 
     // ---------- 7. LOGIN GOOGLE ----------
@@ -564,6 +787,9 @@
         if (batalLangganan) { batalLangganan(); batalLangganan = null; }
         transaksi = [];
         sudahCekMigrasi = false;
+        tutupDetail();
+        keluarModeUbah();
+        aturStatusCloud('kosong');
         tampilLayar('login');
       }
     });
@@ -571,19 +797,26 @@
     // ---------- 8. SINKRONISASI DENGAN FIRESTORE ----------
     function mulaiMendengarkan() {
       if (batalLangganan) batalLangganan();
-      // onSnapshot dipanggil sekali di awal dan lagi setiap data berubah (juga dari perangkat lain)
-      batalLangganan = onSnapshot(koleksiTransaksi(), (hasil) => {
+      aturStatusCloud('menghubungkan');
+      // includeMetadataChanges = kita juga diberi tahu saat data resmi diterima/disimpan server
+      batalLangganan = onSnapshot(koleksiTransaksi(), { includeMetadataChanges: true }, (hasil) => {
         el('pesanCloud').classList.add('hidden');
         transaksi = hasil.docs.map(d => d.data());
 
-        // Pertama kali login & cloud masih kosong: tawarkan memindahkan data lama dari browser
-        if (!sudahCekMigrasi) {
+        // Tentukan status: ada tulisan yang belum diterima server / data masih dari cache / sudah dari server
+        if (hasil.metadata.hasPendingWrites) aturStatusCloud('menyimpan');
+        else if (hasil.metadata.fromCache) aturStatusCloud('menghubungkan');
+        else aturStatusCloud('tersimpan');
+
+        // Pertama kali login & cloud (data dari server) masih kosong: tawarkan memindahkan data lama dari browser
+        if (!sudahCekMigrasi && !hasil.metadata.fromCache) {
           sudahCekMigrasi = true;
           if (hasil.empty) pindahkanDataLama();
         }
         isiFilterTahun();
         render();
       }, (err) => {
+        aturStatusCloud('gagal');
         el('pesanCloud').textContent = 'Gagal memuat data dari cloud (' + err.code + '). Periksa aturan Firestore.';
         el('pesanCloud').classList.remove('hidden');
       });
